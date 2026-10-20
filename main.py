@@ -44,7 +44,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("My Calculator")
-        self.resize(1040, 700)
+        self.resize(800, 826)
         self.setMinimumSize(760, 520)
 
         root = QWidget()
@@ -99,6 +99,18 @@ class MainWindow(QMainWindow):
         self.pulse_timer.timeout.connect(self.pulse_highlight)
         self.pulse_on = False
         QApplication.instance().installEventFilter(self)
+        self.window_size_label = QLabel()
+        self.window_size_label.setAccessibleName('현재 창 크기')
+        self.statusBar().addPermanentWidget(self.window_size_label)
+        self.update_window_size()
+
+    def update_window_size(self):
+        self.window_size_label.setText(f'{self.width()} × {self.height()} px')
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, 'window_size_label'):
+            self.update_window_size()
 
     def build_conversion(self):
         outer = QVBoxLayout(self.conversion_page)

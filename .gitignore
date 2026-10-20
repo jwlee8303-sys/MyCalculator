@@ -4,3 +4,5 @@ __pycache__/
 *.py[cod]
 .tcl/
 dynamo-preview.png
+build/
+dist/

@@ -119,3 +119,10 @@ python -m venv .venv
 ```
 
 이미 .venv가 있으면 가상환경 생성은 생략합니다.
+
+## Windows 실행파일
+
+`dist\MyCalculator.exe`는 Python 설치 없이 실행하는 단일 실행파일입니다.
+Windows에서 `build.bat`을 실행하면 빌드 의존성을 설치하고 실행파일을 생성합니다.
+빌드 설정은 `MyCalculator.spec`, 의존성은 `requirements-build.txt`에 있습니다.
+`build/`와 `dist/`는 생성물이므로 Git 추적에서 제외합니다.
