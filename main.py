@@ -94,7 +94,7 @@ class MainWindow(QMainWindow):
         self.fields = {}
         self.unit_boxes = {}
         self.result_cells = {}
-        self.quantity_names = {"energy": "운동에너지", "speed": "초기속도", "mass": "등가관성중량", "distance": "제동거리", "deceleration": "감속도"}
+        self.quantity_names = {"energy": "운동에너지(KE)", "speed": "초기속도(v)", "mass": "등가관성중량(m)", "distance": "제동거리(s)", "deceleration": "감속도(a)"}
         for row, (key, name) in enumerate(self.quantity_names.items(), start=1):
             grid.addWidget(QLabel(name), row, 0)
             field = QLineEdit()
