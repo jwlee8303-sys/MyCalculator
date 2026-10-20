@@ -7,7 +7,7 @@ UNITS = {
                "cal (열화학)": 4.184, "kcal (열화학)": 4184.0},
     "speed": {"m/s": 1.0, "km/h": 1 / 3.6, "mph": 0.44704,
               "ft/s": 0.3048, "kn": 1852 / 3600},
-    "mass": {"kg": 1.0, "g": 0.001, "t": 1000.0, "lb": 0.45359237},
+    "mass": {"kg": 1.0, "g": 0.001, "t": 1000.0, "lbs": 0.45359237},
 }
 
 BRAKING_UNITS = {
@@ -15,8 +15,49 @@ BRAKING_UNITS = {
     "distance": {"m": 1.0, "cm": 0.01, "mm": 0.001, "km": 1000.0,
                  "ft": 0.3048, "in": 0.0254, "yd": 0.9144},
     "deceleration": {"m/s²": 1.0, "g": 9.80665, "km/h/s": 1 / 3.6,
-                     "ft/s²": 0.3048, "mph/s": 0.44704, "cm/s²": 0.01},
+                     "ft/s²": 0.3048, "ft/s^2": 0.3048, "mph/s": 0.44704, "cm/s²": 0.01},
 }
+
+
+TORQUE_UNITS = {
+    "mass": UNITS["mass"],
+    "deceleration": BRAKING_UNITS["deceleration"],
+    "radius": {"m": 1.0, "cm": 0.01, "mm": 0.001, "ft": 0.3048, "in": 0.0254},
+    "torque": {"N·m": 1.0, "N·cm": 0.01, "N·mm": 0.001, "kN·m": 1000.0,
+               "kgf·m": 9.80665, "kgf·cm": 0.0980665,
+               "lbf·ft": 1.3558179483314004, "lbf·in": 0.1129848290276167},
+}
+
+TORQUE_FORMULAS = {"torque": "T = m × a × r", "mass": "m = T / (a × r)",
+                   "deceleration": "a = T / (m × r)", "radius": "r = T / (m × a)"}
+
+
+def solve_torque(values, units):
+    """Wheel braking torque magnitude: T = m*a*r, converted through SI units."""
+    missing = [key for key in TORQUE_UNITS if values.get(key) is None]
+    if len(missing) != 1:
+        raise ValueError("제동토크·등가관성중량·감속도·회전반경 중 세 개만 입력하고, 계산할 항목은 비워 주세요.")
+    si = {}
+    for key, options in TORQUE_UNITS.items():
+        if values.get(key) is None:
+            continue
+        number = float(values[key]) * options[units[key]]
+        if not math.isfinite(number) or number <= 0:
+            raise ValueError("제동토크, 등가관성중량, 감속도, 회전반경은 유한한 양수로 입력해 주세요.")
+        si[key] = number
+    target = missing[0]
+    try:
+        if target == "torque":
+            result = si["mass"] * si["deceleration"] * si["radius"]
+        else:
+            others = [key for key in ("mass", "deceleration", "radius") if key != target]
+            result = si["torque"] / si[others[0]] / si[others[1]]
+        result /= TORQUE_UNITS[target][units[target]]
+    except (OverflowError, ZeroDivisionError):
+        raise ValueError("계산 가능한 숫자 범위를 벗어났습니다.") from None
+    if not math.isfinite(result) or result <= 0:
+        raise ValueError("계산 가능한 숫자 범위를 벗어났습니다.")
+    return target, result
 
 
 def solve_braking(values, units):

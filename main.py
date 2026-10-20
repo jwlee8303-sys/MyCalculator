@@ -1,12 +1,43 @@
 """PySide6 application with dynamo and unit-conversion tabs."""
 import sys
+import math
+from decimal import Decimal, ROUND_HALF_UP, localcontext
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QEvent, QTimer
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel,
-    QLineEdit, QMainWindow, QPushButton, QScrollArea, QTabWidget, QVBoxLayout, QWidget,
+    QLineEdit, QMainWindow, QPushButton, QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
-from dynamo import BRAKING_UNITS, UNITS, solve, solve_braking
+from dynamo import BRAKING_UNITS, UNITS, TORQUE_UNITS, solve, solve_braking, solve_torque
+from conversion import CONVERSION_UNITS, CONVERSION_NAMES, CONVERSION_DEFAULTS, convert_value
+
+
+CALCULATION_ROUTES = {
+    "energy": [(('mass', 'speed'), 'KE = ½ × m × v²')],
+    "speed": [(('energy', 'mass'), 'v = √(2 × KE / m)')],
+    "mass": [(('energy', 'speed'), 'm = 2 × KE / v²'),
+             (('torque', 'deceleration', 'radius'), 'm = T / (a × r)')],
+    "distance": [(('speed', 'deceleration'), 's = v² / (2 × a)')],
+    "deceleration": [(('speed', 'distance'), 'a = v² / (2 × s)'),
+                     (('torque', 'mass', 'radius'), 'a = T / (m × r)')],
+    "radius": [(('torque', 'mass', 'deceleration'), 'r = T / (m × a)')],
+    "torque": [(('mass', 'deceleration', 'radius'), 'T = m × a × r')],
+}
+
+DRUM_DIAMETER_METERS = 120 * 0.0254
+DEFAULT_UNITS = {'energy': 'MJ', 'speed': 'ft/s', 'mass': 'lbs', 'distance': 'ft',
+                 'deceleration': 'ft/s^2', 'radius': 'in', 'torque': 'lbf·in'}
+DEFAULT_DECIMALS = {'energy': 0, 'speed': 2, 'mass': 0, 'distance': 0,
+                    'deceleration': 2, 'radius': 1, 'torque': 0}
+
+
+def format_number(value, places):
+    """Round halves up for display without rounding intermediate calculations."""
+    number = Decimal(str(value))
+    with localcontext() as context:
+        context.prec = max(32, number.adjusted() + places + 3)
+        rounded = number.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
+    return f'{abs(rounded) if rounded == 0 else rounded:,.{places}f}'
 
 
 class MainWindow(QMainWindow):
@@ -24,9 +55,9 @@ class MainWindow(QMainWindow):
 
         header = QFrame()
         header.setObjectName("header")
-        header.setMinimumHeight(132)
+        header.setFixedHeight(88)
         header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(32, 24, 32, 24)
+        header_layout.setContentsMargins(32, 12, 32, 12)
         header_layout.setSpacing(18)
 
         emblem = QLabel("＋")
@@ -56,10 +87,102 @@ class MainWindow(QMainWindow):
         self.dynamo_page = QWidget()
         self.build_dynamo()
         self.conversion_page = QWidget()
+        self.build_conversion()
         self.tabs.addTab(self.dynamo_page, "다이나모")
         self.tabs.addTab(self.conversion_page, "단위환산")
         layout.addWidget(self.tabs, 1)
         self.setCentralWidget(root)
+        self.guide_target = None
+        self.guide_dependencies = ()
+        self.pulse_timer = QTimer(self)
+        self.pulse_timer.setInterval(550)
+        self.pulse_timer.timeout.connect(self.pulse_highlight)
+        self.pulse_on = False
+        QApplication.instance().installEventFilter(self)
+
+    def build_conversion(self):
+        outer = QVBoxLayout(self.conversion_page)
+        outer.setContentsMargins(28, 20, 28, 20)
+        controls = QHBoxLayout()
+        controls.addWidget(QLabel('소수점'))
+        self.conversion_decimals = QSpinBox()
+        self.conversion_decimals.setRange(0, 12)
+        self.conversion_decimals.setValue(2)
+        self.conversion_decimals.setAccessibleName('단위환산 전체 소수점')
+        controls.addWidget(self.conversion_decimals)
+        controls.addStretch()
+        outer.addLayout(controls)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget()
+        sections = QVBoxLayout(content)
+        sections.setContentsMargins(0, 0, 0, 0)
+        sections.setSpacing(12)
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
+        self.conversion_rows = {}
+        for category, title in CONVERSION_NAMES.items():
+            card = QFrame()
+            card.setObjectName('inputCard')
+            grid = QGridLayout(card)
+            grid.setContentsMargins(16, 12, 16, 16)
+            heading = QLabel(title)
+            heading.setObjectName('conversionTitle')
+            grid.addWidget(heading, 0, 0, 1, 5)
+            grid.setColumnStretch(0, 1)
+            grid.setColumnStretch(3, 1)
+            self.conversion_rows[category] = []
+            for index, (source_unit, target_unit) in enumerate(CONVERSION_DEFAULTS[category]):
+                field = QLineEdit()
+                field.setPlaceholderText('값 입력')
+                field.setClearButtonEnabled(True)
+                source = QComboBox()
+                target = QComboBox()
+                for box in (source, target):
+                    box.addItems(list(CONVERSION_UNITS[category]))
+                source.setCurrentText(source_unit)
+                target.setCurrentText(target_unit)
+                result = QLineEdit()
+                result.setReadOnly(True)
+                result.setObjectName('conversionResult')
+                result.setPlaceholderText('결과')
+                for widget, label in ((field, '입력값'), (source, '입력 단위'),
+                                      (target, '결과 단위'), (result, '결과')):
+                    widget.setAccessibleName(f'{title} 변환 {index + 1} {label}')
+                row = {'input': field, 'source': source, 'target': target, 'result': result}
+                self.conversion_rows[category].append(row)
+                for column, widget in enumerate((field, source, QLabel('→'), result, target)):
+                    grid.addWidget(widget, index + 1, column)
+                update = lambda *_, c=category, r=row: self.update_conversion(c, r)
+                field.textChanged.connect(update)
+                source.currentTextChanged.connect(update)
+                target.currentTextChanged.connect(update)
+            sections.addWidget(card)
+        sections.addStretch()
+        self.conversion_decimals.valueChanged.connect(self.update_all_conversions)
+
+    def update_conversion(self, category, row):
+        text = row['input'].text().strip()
+        result = row['result']
+        result.clear()
+        result.setToolTip('')
+        result.setPlaceholderText('결과')
+        if not text:
+            return
+        try:
+            value = convert_value(category, text, row['source'].currentText(), row['target'].currentText())
+        except ValueError as error:
+            message = str(error) if not str(error).startswith('could not convert') else '올바른 숫자를 입력해 주세요.'
+            result.setPlaceholderText('입력 확인')
+            result.setToolTip(message)
+            return
+        result.setText(format_number(value, self.conversion_decimals.value()))
+
+    def update_all_conversions(self, *_):
+        for category, rows in self.conversion_rows.items():
+            for row in rows:
+                self.update_conversion(category, row)
 
     def build_dynamo(self):
         outer = QVBoxLayout(self.dynamo_page)
@@ -73,12 +196,6 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(content)
         layout.setContentsMargins(28, 24, 28, 24)
         layout.setSpacing(16)
-        heading = QLabel("다이나모 계산")
-        heading.setObjectName("sectionTitle")
-        layout.addWidget(heading)
-        instruction = QLabel("운동에너지·초기속도·등가관성중량 중 두 값을 입력하세요. 제동거리·감속도는 한 값만 입력하면 됩니다.")
-        instruction.setWordWrap(True)
-        layout.addWidget(instruction)
         card = QFrame()
         card.setObjectName("inputCard")
         grid = QGridLayout(card)
@@ -89,14 +206,22 @@ class MainWindow(QMainWindow):
         grid.addWidget(QLabel("입력값"), 0, 1)
         grid.addWidget(QLabel("단위"), 0, 2)
         grid.addWidget(QLabel("결과"), 0, 3)
+        grid.addWidget(QLabel("소수점"), 0, 4)
         grid.setColumnStretch(1, 1)
         grid.setColumnStretch(3, 1)
         self.fields = {}
         self.unit_boxes = {}
         self.result_cells = {}
-        self.quantity_names = {"energy": "운동에너지(KE)", "speed": "초기속도(v)", "mass": "등가관성중량(m)", "distance": "제동거리(s)", "deceleration": "감속도(a)"}
+        self.name_cells = {}
+        self.decimal_boxes = {}
+        self.quantity_names = {"energy": "운동에너지(KE)", "speed": "초기속도(v)", "mass": "등가관성중량(m)", "distance": "제동거리(s)", "deceleration": "감속도(a)", "radius": "회전반경(r)", "torque": "제동토크(T)"}
         for row, (key, name) in enumerate(self.quantity_names.items(), start=1):
-            grid.addWidget(QLabel(name), row, 0)
+            name_cell = QLabel(name)
+            name_cell.setProperty('calculationTarget', key)
+            name_cell.setCursor(Qt.CursorShape.PointingHandCursor)
+            name_cell.setToolTip('클릭하면 필요한 입력 항목과 수식을 표시합니다.')
+            grid.addWidget(name_cell, row, 0)
+            self.name_cells[key] = name_cell
             field = QLineEdit()
             field.setPlaceholderText("값 입력 또는 비워두기")
             field.setClearButtonEnabled(True)
@@ -106,9 +231,9 @@ class MainWindow(QMainWindow):
             grid.addWidget(field, row, 1)
             self.fields[key] = field
             box = QComboBox()
-            box.addItems(list((UNITS | BRAKING_UNITS)[key]))
+            box.addItems(list((UNITS | BRAKING_UNITS | TORQUE_UNITS)[key]))
+            box.setCurrentText(DEFAULT_UNITS[key])
             box.setAccessibleName(f"{name} 단위")
-            box.currentTextChanged.connect(self.clear_result)
             grid.addWidget(box, row, 2)
             self.unit_boxes[key] = box
             result_cell = QLabel("—")
@@ -116,9 +241,17 @@ class MainWindow(QMainWindow):
             result_cell.setAccessibleName(f"{name} 결과")
             result_cell.setWordWrap(True)
             result_cell.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            result_cell.setProperty('calculationTarget', key)
+            result_cell.setCursor(Qt.CursorShape.PointingHandCursor)
+            result_cell.setToolTip('클릭하면 필요한 입력 항목과 수식을 표시합니다.')
             grid.addWidget(result_cell, row, 3)
             self.result_cells[key] = result_cell
-        self.unit_boxes["speed"].setCurrentText("km/h")
+            decimals = QSpinBox()
+            decimals.setRange(0, 12)
+            decimals.setValue(DEFAULT_DECIMALS[key])
+            decimals.setAccessibleName(f'{name} 소수점 자릿수')
+            grid.addWidget(decimals, row, 4)
+            self.decimal_boxes[key] = decimals
         layout.addWidget(card)
         actions = QHBoxLayout()
         calculate = QPushButton("계산하기")
@@ -130,33 +263,87 @@ class MainWindow(QMainWindow):
         actions.addWidget(reset)
         actions.addStretch()
         layout.addLayout(actions)
-        results = QHBoxLayout()
-        results.setSpacing(16)
-        self.result = QLabel()
-        self.braking_result = QLabel()
-        for label in (self.result, self.braking_result):
-            label.setObjectName("result")
-            label.setWordWrap(True)
-            label.setMinimumWidth(0)
-            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            results.addWidget(label, 1)
+        self.guide_formula = QLabel()
+        self.guide_formula.setObjectName('guideFormula')
+        self.guide_formula.setWordWrap(True)
+        self.guide_formula.hide()
+        layout.addWidget(self.guide_formula)
+        # Keep calculation diagnostics internal; no explanatory panels are displayed.
+        self.result = QLabel(self)
+        self.braking_result = QLabel(self)
+        self.torque_result = QLabel(self)
+        for label in (self.result, self.braking_result, self.torque_result):
             label.hide()
-        layout.addLayout(results)
-        note = QLabel(
-            "E = ½mv²  ·  a = v²/(2s)  ·  s = v²/(2a)\n"
-            "초기속도를 함께 사용하며, 비워두면 운동에너지와 등가관성중량으로 계산한 속도를 사용합니다.\n"
-            "등가관성중량은 질량, 감속도는 양의 크기입니다. 정지까지 일정 감속하며 반응거리는 제외합니다."
-        )
-        note.setObjectName("calculationNote")
-        note.setWordWrap(True)
-        layout.addWidget(note)
         layout.addStretch()
+        for box in self.unit_boxes.values():
+            box.currentTextChanged.connect(lambda _: self.calculate())
+        for box in self.decimal_boxes.values():
+            box.valueChanged.connect(lambda _: self.calculate())
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.MouseButtonPress and isinstance(watched, QWidget):
+            if watched is self or self.isAncestorOf(watched):
+                target = watched.property('calculationTarget')
+                if target:
+                    self.toggle_guide(target)
+                    return True
+                self.clear_guide()
+        return super().eventFilter(watched, event)
+
+    def closeEvent(self, event):
+        self.clear_guide()
+        QApplication.instance().removeEventFilter(self)
+        super().closeEvent(event)
+
+    def toggle_guide(self, target):
+        previous = self.guide_target
+        self.clear_guide()
+        if target == previous:
+            return
+        self.guide_target = target
+        # Prefer the formula best supported by the current inputs or computed results.
+        def available(key):
+            return bool(self.fields[key].text().strip()) or self.result_cells[key].text() != '—'
+        dependencies, formula = max(
+            CALCULATION_ROUTES[target],
+            key=lambda route: sum(available(k) for k in route[0]) / len(route[0]),
+        )
+        self.guide_dependencies = dependencies
+        names = ' · '.join(self.quantity_names[k] for k in dependencies)
+        self.guide_formula.setText(f'{self.quantity_names[target]} 계산: {formula}\n'
+                                   f'필요한 항목: {names}\n'
+                                   '수식 기준 단위: KE[J], m[kg], v[m/s], s·r[m], a[m/s²], T[N·m]. 선택 단위는 자동 환산합니다.')
+        self.guide_formula.show()
+        self.pulse_highlight()
+        self.pulse_timer.start()
+
+    def set_highlight(self, key, phase):
+        for widget in (self.name_cells[key], self.fields[key], self.unit_boxes[key], self.result_cells[key]):
+            widget.setProperty('requiredPulse', phase)
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
+            widget.update()
+
+    def pulse_highlight(self):
+        self.pulse_on = not self.pulse_on
+        for key in self.guide_dependencies:
+            self.set_highlight(key, 1 if self.pulse_on else 2)
+
+    def clear_guide(self):
+        self.pulse_timer.stop()
+        for key in self.guide_dependencies:
+            self.set_highlight(key, 0)
+        self.guide_target = None
+        self.guide_dependencies = ()
+        self.pulse_on = False
+        self.guide_formula.clear()
+        self.guide_formula.hide()
 
     def clear_result(self, *_):
         for cell in self.result_cells.values():
             cell.setText("—")
         if hasattr(self, "result"):
-            for label in (self.result, self.braking_result):
+            for label in (self.result, self.braking_result, self.torque_result):
                 label.clear()
                 label.hide()
 
@@ -176,30 +363,65 @@ class MainWindow(QMainWindow):
         for key, field in self.fields.items():
             if field.text().strip():
                 self.result_cells[key].setText(f"{field.text()} {units[key]}")
-        calculated_speed = None
-        try:
-            values = self.read_values(UNITS)
-            key, value = solve(values, units)
-            self.result_cells[key].setText(f"{value:,.12g} {units[key]}")
-            if key == "speed":
-                calculated_speed = value
-        except ValueError as error:
-            self.result.setText(str(error))
-            self.result.show()
-
-        if not any(self.fields[k].text().strip() for k in ("distance", "deceleration")):
-            return
-        try:
-            values = self.read_values(BRAKING_UNITS)
-            if values["speed"] is None:
-                values["speed"] = calculated_speed
-            key, value = solve_braking(values, units)
-            self.result_cells[key].setText(f"{value:,.12g} {units[key]}")
-        except ValueError as error:
-            self.braking_result.setText(str(error))
-            self.braking_result.show()
+        values = {}
+        invalid = {}
+        for key in self.fields:
+            try:
+                values.update(self.read_values((key,)))
+            except ValueError as error:
+                values[key] = None
+                invalid[key] = str(error)
+        torque_active = any(self.fields[k].text().strip() for k in ("radius", "torque"))
+        braking_active = any(self.fields[k].text().strip() for k in ("distance", "deceleration"))
+        groups = [(UNITS, solve, self.result, True),
+                  (BRAKING_UNITS, solve_braking, self.braking_result, braking_active),
+                  (TORQUE_UNITS, solve_torque, self.torque_result, torque_active)]
+        # Resolve dependencies in either direction without changing the user's inputs.
+        for _ in range(len(self.fields)):
+            changed = False
+            for options, solver, label, active in groups:
+                if not active or any(k in invalid for k in options):
+                    continue
+                try:
+                    key, value = solver(values, units)
+                except ValueError:
+                    continue
+                if values[key] is not None:
+                    continue
+                values[key] = value
+                self.result_cells[key].setText(f"{value:,.12g} {units[key]}")
+                changed = True
+            if not changed:
+                break
+        for options, solver, label, active in groups:
+            if not active:
+                continue
+            error = next((invalid[k] for k in options if k in invalid), None)
+            if solver is solve_torque and all(self.fields[k].text().strip() for k in options) and error is None:
+                error = "제동토크·등가관성중량·감속도·회전반경 중 세 개만 입력하고, 계산할 항목은 비워 주세요."
+            if error is None and all(values[k] is not None for k in options):
+                continue
+            if error is None:
+                try:
+                    solver(values, units)
+                except ValueError as exc:
+                    error = str(exc)
+            if error:
+                label.setText(error)
+        for key, value in values.items():
+            if value is not None and math.isfinite(value):
+                places = self.decimal_boxes[key].value()
+                text = f'{format_number(value, places)} {units[key]}'
+                if key == 'speed':
+                    speed_si = value * UNITS['speed'][units['speed']]
+                    rpm = speed_si * (60 / (math.pi * DRUM_DIAMETER_METERS))
+                    if math.isfinite(rpm) and rpm >= 0:
+                        text += f' ({format_number(rpm, places)} RPM)'
+                self.result_cells[key].setText(text)
+        self.result_cells['speed'].setToolTip('클릭하면 필요한 입력 항목과 수식을 표시합니다.\nRPM은 지름 120인치(3.048 m) 드럼의 선속도 기준입니다.')
 
     def reset_dynamo(self):
+        self.clear_guide()
         for field in self.fields.values():
             field.clear()
         self.clear_result()
@@ -236,8 +458,10 @@ QTabBar::tab:selected {
 }
 QTabBar::tab:hover:!selected { background: #e5d9f2; color: #61358f; }
 QLabel#sectionTitle { font-size: 22px; font-weight: bold; color: #61358f; }
+QLabel#conversionTitle { font-size: 16px; font-weight: bold; color: #61358f; }
+QLineEdit#conversionResult { background: #eee7f6; font-weight: bold; }
 QFrame#inputCard { background: #faf8fd; border: 1px solid #e3daef; border-radius: 10px; }
-QLineEdit, QComboBox { background: white; padding: 9px; border: 1px solid #d6c7e6; border-radius: 5px; }
+QLineEdit, QComboBox, QSpinBox { background: white; padding: 9px; border: 1px solid #d6c7e6; border-radius: 5px; }
 QLineEdit:focus, QComboBox:focus { border: 1px solid #8750c4; }
 QPushButton { padding: 10px 24px; background: #eee7f6; border: 1px solid #d6c7e6; border-radius: 6px; }
 QPushButton:hover { background: #e5d9f2; }
@@ -246,6 +470,9 @@ QPushButton#primary:hover { background: #61358f; }
 QLabel#result { background: #eee7f6; border-radius: 8px; padding: 16px; font-size: 17px; color: #61358f; }
 QLabel#resultCell { background: #eee7f6; border-radius: 5px; padding: 9px; color: #61358f; font-weight: bold; }
 QLabel#calculationNote { color: #77618e; font-size: 12px; }
+QLabel#guideFormula { background: #edf6ff; color: #214f7b; border: 1px solid #bddcf5; border-radius: 8px; padding: 12px; }
+QLabel[requiredPulse="1"], QLabel#resultCell[requiredPulse="1"], QLineEdit[requiredPulse="1"], QComboBox[requiredPulse="1"] { background: #d7ecff; color: #214f7b; }
+QLabel[requiredPulse="2"], QLabel#resultCell[requiredPulse="2"], QLineEdit[requiredPulse="2"], QComboBox[requiredPulse="2"] { background: #f0f8ff; color: #214f7b; }
 """
 
 

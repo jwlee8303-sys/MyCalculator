@@ -1,7 +1,7 @@
 import math
 import unittest
 
-from dynamo import BRAKING_UNITS, UNITS, solve, solve_braking
+from dynamo import BRAKING_UNITS, UNITS, TORQUE_UNITS, solve, solve_braking, solve_torque
 
 
 class DynamoTests(unittest.TestCase):
@@ -76,6 +76,38 @@ class BrakingTests(unittest.TestCase):
                        {"speed": 1e308, "distance": 10}):
             with self.subTest(values=values), self.assertRaises(ValueError):
                 solve_braking(values, units)
+
+
+class TorqueTests(unittest.TestCase):
+    def test_all_targets_and_units(self):
+        reference = {"mass": 1000.0, "deceleration": 5.0, "radius": 0.3, "torque": 1500.0}
+        for target in reference:
+            for quantity, options in TORQUE_UNITS.items():
+                for unit in options:
+                    with self.subTest(target=target, quantity=quantity, unit=unit):
+                        units = {k: next(iter(v)) for k, v in TORQUE_UNITS.items()}
+                        units[quantity] = unit
+                        values = {k: v / TORQUE_UNITS[k][units[k]] for k, v in reference.items()}
+                        values[target] = None
+                        key, result = solve_torque(values, units)
+                        self.assertEqual(key, target)
+                        self.assertAlmostEqual(result * TORQUE_UNITS[target][units[target]], reference[target])
+
+    def test_kgf_torque_and_gravity_acceleration(self):
+        units = {"mass": "kg", "deceleration": "g", "radius": "mm", "torque": "kgf·m"}
+        self.assertAlmostEqual(solve_torque({"mass": 1000, "deceleration": 1, "radius": 300}, units)[1], 300)
+
+    def test_invalid_inputs(self):
+        units = {k: next(iter(v)) for k, v in TORQUE_UNITS.items()}
+        for values in ({}, {"mass": 1000, "radius": 0.3},
+                       {"mass": 1000, "deceleration": 5, "radius": 0.3, "torque": 1500},
+                       {"mass": 0, "deceleration": 5, "radius": 0.3},
+                       {"mass": 1000, "deceleration": -5, "radius": 0.3},
+                       {"mass": 1000, "deceleration": 5, "radius": float("nan")},
+                       {"mass": 1e308, "deceleration": 5, "radius": 1e308},
+                       {"torque": 1500, "mass": 1e-300, "radius": 1e-300}):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                solve_torque(values, units)
 
 
 if __name__ == "__main__":
