@@ -1,0 +1,6 @@
+.venv/
+.uv-cache/
+__pycache__/
+*.py[cod]
+.tcl/
+dynamo-preview.png
